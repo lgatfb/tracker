@@ -1,0 +1,481 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Tageswerte Tracker (1–10)</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 16px; }
+    h1 { margin: 0 0 12px; font-size: 20px; }
+    .row { display: flex; flex-wrap: wrap; gap: 12px; align-items: end; margin-bottom: 12px; }
+    .field { display: flex; flex-direction: column; gap: 6px; min-width: 200px; }
+    label { font-size: 12px; color: #333; }
+    select, input[type="date"], button {
+      padding: 8px; font-size: 14px; border: 1px solid #bbb; border-radius: 6px; background: #fff;
+    }
+    button { cursor: pointer; }
+    button:disabled { opacity: 0.6; cursor: not-allowed; }
+    .status { font-size: 13px; padding: 8px; border-radius: 6px; background: #f5f5f5; border: 1px solid #e3e3e3; }
+    .split { display: grid; grid-template-columns: 1fr; gap: 12px; }
+    @media (min-width: 980px) { .split { grid-template-columns: 420px 1fr; } }
+    .card { border: 1px solid #e3e3e3; border-radius: 10px; padding: 12px; background: #fff; }
+    .small { font-size: 12px; color: #555; margin-top: 8px; }
+    canvas { width: 100%; height: 420px; border: 1px solid #e3e3e3; border-radius: 10px; background: #fff; }
+    table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 13px; }
+    th, td { border-bottom: 1px solid #eee; padding: 6px 4px; text-align: left; }
+    th { font-weight: 600; }
+    .legend { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; font-size: 13px; }
+    .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; margin-right: 6px; }
+    .danger { background: #fff2f2; border-color: #ffd0d0; }
+    .ok { background: #f2fff5; border-color: #c9f2d3; }
+  </style>
+</head>
+
+<body>
+  <h1>Tageswerte (morgens / mittags / abends)</h1>
+
+  <div class="split">
+    <div class="card">
+      <div class="row">
+        <div class="field">
+          <label for="dateInput">Kalendertag</label>
+          <input id="dateInput" type="date" />
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="field">
+          <label for="morningSelect">Morgens</label>
+          <select id="morningSelect"></select>
+        </div>
+        <div class="field">
+          <label for="noonSelect">Mittags</label>
+          <select id="noonSelect"></select>
+        </div>
+        <div class="field">
+          <label for="eveningSelect">Abends</label>
+          <select id="eveningSelect"></select>
+        </div>
+      </div>
+
+      <div class="row">
+        <button id="saveBtn">Werte speichern</button>
+        <button id="deleteBtn">Tag löschen</button>
+        <button id="chartBtn">Diagramm anzeigen</button>
+      </div>
+
+      <div id="status" class="status">Bereit.</div>
+
+      <div class="small">
+        Hinweis: Ein Tag ist nur gültig, wenn <b>alle drei</b> Werte gesetzt sind.
+      </div>
+
+      <div id="tableWrap"></div>
+    </div>
+
+    <div class="card">
+      <div class="legend" aria-label="Legende">
+        <span><span class="dot" style="background:red"></span>Morgens (rot)</span>
+        <span><span class="dot" style="background:blue"></span>Mittags (blau)</span>
+        <span><span class="dot" style="background:green"></span>Abends (grün)</span>
+      </div>
+      <div style="height:10px"></div>
+      <canvas id="chartCanvas" width="1100" height="520"></canvas>
+      <div class="small">
+        X-Achse: Datum (chronologisch) · Y-Achse: 1–10
+      </div>
+    </div>
+  </div>
+
+  <script>
+    /***********************************************************************
+     * 1) Konstante Wert-Label-Zuordnung (verpflichtend)
+     ***********************************************************************/
+    const VALUE_LABELS = {
+      1: "sehr schlecht",
+      2: "schlecht",
+      3: "sehr unzufrieden",
+      4: "unzufrieden",
+      5: "neutral",
+      6: "eher zufrieden",
+      7: "zufrieden",
+      8: "gut",
+      9: "sehr gut",
+      10: "ausgezeichnet"
+    };
+
+    /***********************************************************************
+     * 2) Storage-Layer (Datenlogik: Speichern / Laden)
+     *    - localStorage Key: ISO-Datum "YYYY-MM-DD"
+     *    - Value: JSON-Objekt { morning: 1..10, noon: 1..10, evening: 1..10 }
+     ***********************************************************************/
+    const Storage = {
+      saveDay(isoDate, valuesObj) {
+        // Intern nur numerische Werte speichern (1..10)
+        localStorage.setItem(isoDate, JSON.stringify(valuesObj));
+      },
+      loadDay(isoDate) {
+        const raw = localStorage.getItem(isoDate);
+        if (!raw) return null;
+        try { return JSON.parse(raw); } catch { return null; }
+      },
+      deleteDay(isoDate) {
+        localStorage.removeItem(isoDate);
+      },
+      loadAllDays() {
+        // Alle localStorage Keys lesen, die wie ISO-Datum aussehen, sortieren
+        const keys = [];
+        for (let i = 0; i < localStorage.length; i++) {
+          const k = localStorage.key(i);
+          if (/^\d{4}-\d{2}-\d{2}$/.test(k)) keys.push(k);
+        }
+        keys.sort(); // ISO-Datum sortiert lexikografisch korrekt chronologisch
+        const data = keys.map(date => ({ date, values: Storage.loadDay(date) }))
+                         .filter(entry => entry.values && Storage.isValidDay(entry.values));
+        return data;
+      },
+      isValidDay(valuesObj) {
+        // "Ein Tag gilt nur als gültig, wenn alle drei Werte gesetzt sind."
+        if (!valuesObj) return false;
+        const { morning, noon, evening } = valuesObj;
+        return Storage.isValidValue(morning) && Storage.isValidValue(noon) && Storage.isValidValue(evening);
+      },
+      isValidValue(v) {
+        return Number.isInteger(v) && v >= 1 && v <= 10;
+      }
+    };
+
+    /***********************************************************************
+     * 3) DOM-Handling (UI Logik)
+     ***********************************************************************/
+    const dom = {
+      dateInput: document.getElementById("dateInput"),
+      morningSelect: document.getElementById("morningSelect"),
+      noonSelect: document.getElementById("noonSelect"),
+      eveningSelect: document.getElementById("eveningSelect"),
+      saveBtn: document.getElementById("saveBtn"),
+      deleteBtn: document.getElementById("deleteBtn"),
+      chartBtn: document.getElementById("chartBtn"),
+      status: document.getElementById("status"),
+      tableWrap: document.getElementById("tableWrap"),
+      canvas: document.getElementById("chartCanvas")
+    };
+
+    function setStatus(msg, kind = "neutral") {
+      dom.status.textContent = msg;
+      dom.status.classList.remove("ok", "danger");
+      if (kind === "ok") dom.status.classList.add("ok");
+      if (kind === "danger") dom.status.classList.add("danger");
+    }
+
+    function buildSelectOptions(selectEl) {
+      // Leerer Platzhalter
+      selectEl.innerHTML = "";
+      const placeholder = document.createElement("option");
+      placeholder.value = "";
+      placeholder.textContent = "Bitte wählen…";
+      selectEl.appendChild(placeholder);
+
+      for (let i = 1; i <= 10; i++) {
+        const opt = document.createElement("option");
+        opt.value = String(i); // value ist Zahl als String, gespeichert wird später Number(...)
+        opt.textContent = `${i} – ${VALUE_LABELS[i]}`;
+        selectEl.appendChild(opt);
+      }
+    }
+
+    function getSelectedValuesFromUI() {
+      const isoDate = dom.dateInput.value;
+      const morning = Number(dom.morningSelect.value);
+      const noon = Number(dom.noonSelect.value);
+      const evening = Number(dom.eveningSelect.value);
+
+      // Wenn nichts gewählt wurde, ist Number("") => 0, das ist ungültig.
+      return { isoDate, values: { morning, noon, evening } };
+    }
+
+    function setUIFromValues(valuesObj) {
+      dom.morningSelect.value = valuesObj?.morning ? String(valuesObj.morning) : "";
+      dom.noonSelect.value = valuesObj?.noon ? String(valuesObj.noon) : "";
+      dom.eveningSelect.value = valuesObj?.evening ? String(valuesObj.evening) : "";
+    }
+
+    function renderTable() {
+      const all = Storage.loadAllDays();
+      if (all.length === 0) {
+        dom.tableWrap.innerHTML = "<div class='small'>Noch keine gespeicherten Tage.</div>";
+        return;
+      }
+
+      let html = "<table><thead><tr><th>Datum</th><th>Morgens</th><th>Mittags</th><th>Abends</th></tr></thead><tbody>";
+      for (const row of all) {
+        html += `<tr>
+          <td>${row.date}</td>
+          <td>${row.values.morning}</td>
+          <td>${row.values.noon}</td>
+          <td>${row.values.evening}</td>
+        </tr>`;
+      }
+      html += "</tbody></table>";
+      dom.tableWrap.innerHTML = html;
+    }
+
+    /***********************************************************************
+     * 4) Diagramm-Rendering (Canvas, reines JS)
+     *    - 3 Linien: morgens (rot), mittags (blau), abends (grün)
+     *    - Y-Achse fest 1..10
+     *    - X-Achse: Tage chronologisch
+     ***********************************************************************/
+    const Chart = {
+      draw() {
+        const ctx = dom.canvas.getContext("2d");
+        const w = dom.canvas.width;
+        const h = dom.canvas.height;
+
+        // Clear
+        ctx.clearRect(0, 0, w, h);
+
+        const data = Storage.loadAllDays();
+        if (data.length === 0) {
+          this.drawEmpty(ctx, w, h, "Keine Daten vorhanden. Bitte Werte speichern.");
+          return;
+        }
+
+        // Layout
+        const padL = 70, padR = 20, padT = 20, padB = 70;
+        const plotW = w - padL - padR;
+        const plotH = h - padT - padB;
+
+        // Axes range
+        const yMin = 1, yMax = 10;
+
+        // X points
+        const n = data.length;
+        const xStep = (n === 1) ? 0 : plotW / (n - 1);
+        const xAt = (i) => padL + i * xStep;
+
+        // Y mapping (higher value => higher on canvas => smaller y)
+        const yAt = (val) => {
+          const t = (val - yMin) / (yMax - yMin);
+          return padT + (1 - t) * plotH;
+        };
+
+        // Grid + axes
+        this.drawAxesAndGrid(ctx, padL, padT, plotW, plotH, yMin, yMax, data);
+
+        // Extract series
+        const seriesMorning = data.map(d => d.values.morning);
+        const seriesNoon    = data.map(d => d.values.noon);
+        const seriesEvening = data.map(d => d.values.evening);
+
+        // Draw lines (fixed colors)
+        this.drawLine(ctx, seriesMorning, xAt, yAt, "red");
+        this.drawLine(ctx, seriesNoon,    xAt, yAt, "blue");
+        this.drawLine(ctx, seriesEvening, xAt, yAt, "green");
+
+        // Draw points (small markers)
+        this.drawPoints(ctx, seriesMorning, xAt, yAt, "red");
+        this.drawPoints(ctx, seriesNoon,    xAt, yAt, "blue");
+        this.drawPoints(ctx, seriesEvening, xAt, yAt, "green");
+      },
+
+      drawEmpty(ctx, w, h, text) {
+        ctx.save();
+        ctx.font = "16px system-ui, -apple-system, Segoe UI, Roboto, Arial";
+        ctx.fillStyle = "#333";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(text, w / 2, h / 2);
+        ctx.restore();
+      },
+
+      drawAxesAndGrid(ctx, padL, padT, plotW, plotH, yMin, yMax, data) {
+        ctx.save();
+
+        // Background
+        ctx.fillStyle = "#fff";
+        ctx.fillRect(padL, padT, plotW, plotH);
+
+        // Horizontal grid & Y labels (1..10)
+        ctx.strokeStyle = "#e6e6e6";
+        ctx.fillStyle = "#333";
+        ctx.font = "12px system-ui, -apple-system, Segoe UI, Roboto, Arial";
+        ctx.textAlign = "right";
+        ctx.textBaseline = "middle";
+
+        for (let y = yMin; y <= yMax; y++) {
+          const t = (y - yMin) / (yMax - yMin);
+          const yy = padT + (1 - t) * plotH;
+
+          ctx.beginPath();
+          ctx.moveTo(padL, yy);
+          ctx.lineTo(padL + plotW, yy);
+          ctx.stroke();
+
+          ctx.fillText(String(y), padL - 8, yy);
+        }
+
+        // Axes
+        ctx.strokeStyle = "#333";
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        // y-axis
+        ctx.moveTo(padL, padT);
+        ctx.lineTo(padL, padT + plotH);
+        // x-axis
+        ctx.lineTo(padL + plotW, padT + plotH);
+        ctx.stroke();
+
+        // X labels (Datum) - nicht jedes Datum bei sehr vielen Punkten
+        const n = data.length;
+        const maxLabels = 12;
+        const step = Math.max(1, Math.ceil(n / maxLabels));
+
+        ctx.textAlign = "center";
+        ctx.textBaseline = "top";
+        ctx.fillStyle = "#333";
+
+        for (let i = 0; i < n; i += step) {
+          const x = (n === 1) ? (padL + plotW / 2) : (padL + (i * plotW) / (n - 1));
+          const label = data[i].date;
+          // small tick
+          ctx.strokeStyle = "#333";
+          ctx.beginPath();
+          ctx.moveTo(x, padT + plotH);
+          ctx.lineTo(x, padT + plotH + 6);
+          ctx.stroke();
+
+          ctx.fillText(label, x, padT + plotH + 10);
+        }
+
+        // Axis titles
+        ctx.save();
+        ctx.fillStyle = "#333";
+        ctx.font = "13px system-ui, -apple-system, Segoe UI, Roboto, Arial";
+        // Y title
+        ctx.translate(18, padT + plotH / 2);
+        ctx.rotate(-Math.PI / 2);
+        ctx.textAlign = "center";
+        ctx.textBaseline = "top";
+        ctx.fillText("Wert (1–10)", 0, 0);
+        ctx.restore();
+
+        ctx.fillStyle = "#333";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "bottom";
+        ctx.fillText("Datum", padL + plotW / 2, padT + plotH + 60);
+
+        ctx.restore();
+      },
+
+      drawLine(ctx, series, xAt, yAt, color) {
+        ctx.save();
+        ctx.strokeStyle = color;        // verpflichtend: rot/blau/grün
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        for (let i = 0; i < series.length; i++) {
+          const x = xAt(i);
+          const y = yAt(series[i]);
+          if (i === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+        ctx.restore();
+      },
+
+      drawPoints(ctx, series, xAt, yAt, color) {
+        ctx.save();
+        ctx.fillStyle = color;
+        for (let i = 0; i < series.length; i++) {
+          const x = xAt(i);
+          const y = yAt(series[i]);
+          ctx.beginPath();
+          ctx.arc(x, y, 3, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        ctx.restore();
+      }
+    };
+
+    /***********************************************************************
+     * 5) Event Wiring
+     ***********************************************************************/
+    function onDateChange() {
+      const isoDate = dom.dateInput.value;
+      if (!isoDate) {
+        setUIFromValues(null);
+        setStatus("Bitte einen Tag auswählen.");
+        return;
+      }
+      const existing = Storage.loadDay(isoDate);
+      if (existing && Storage.isValidDay(existing)) {
+        setUIFromValues(existing);
+        setStatus(`Geladen: ${isoDate} (vorhandene Werte)`, "ok");
+      } else {
+        setUIFromValues(null);
+        setStatus(`Neuer Tag: ${isoDate} (noch keine gespeicherten Werte)`);
+      }
+    }
+
+    function onSave() {
+      const { isoDate, values } = getSelectedValuesFromUI();
+
+      if (!isoDate) {
+        setStatus("Fehler: Kein Datum ausgewählt.", "danger");
+        return;
+      }
+      if (!Storage.isValidDay(values)) {
+        setStatus("Fehler: Bitte morgens, mittags und abends jeweils einen Wert (1–10) auswählen.", "danger");
+        return;
+      }
+
+      Storage.saveDay(isoDate, values);
+      setStatus(`Gespeichert: ${isoDate} (morning=${values.morning}, noon=${values.noon}, evening=${values.evening})`, "ok");
+      renderTable();
+    }
+
+    function onDelete() {
+      const isoDate = dom.dateInput.value;
+      if (!isoDate) {
+        setStatus("Fehler: Kein Datum ausgewählt.", "danger");
+        return;
+      }
+      Storage.deleteDay(isoDate);
+      setUIFromValues(null);
+      setStatus(`Gelöscht: ${isoDate}`, "ok");
+      renderTable();
+      Chart.draw();
+    }
+
+    function onChart() {
+      Chart.draw();
+      setStatus("Diagramm aktualisiert.", "ok");
+    }
+
+    /***********************************************************************
+     * 6) Initialisierung
+     ***********************************************************************/
+    (function init() {
+      buildSelectOptions(dom.morningSelect);
+      buildSelectOptions(dom.noonSelect);
+      buildSelectOptions(dom.eveningSelect);
+
+      // Standard: heutiges Datum vorbelegen (lokal)
+      const today = new Date();
+      const yyyy = today.getFullYear();
+      const mm = String(today.getMonth() + 1).padStart(2, "0");
+      const dd = String(today.getDate()).padStart(2, "0");
+      dom.dateInput.value = `${yyyy}-${mm}-${dd}`;
+
+      dom.dateInput.addEventListener("change", onDateChange);
+      dom.saveBtn.addEventListener("click", onSave);
+      dom.deleteBtn.addEventListener("click", onDelete);
+      dom.chartBtn.addEventListener("click", onChart);
+
+      onDateChange();
+      renderTable();
+      Chart.draw();
+    })();
+  </script>
+</body>
+</html>
